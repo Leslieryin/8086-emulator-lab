@@ -7,7 +7,7 @@
  */
 import { assemble } from "./asm.js";
 import { CPU } from "./cpu.js";
-import { createBuzzerBoard, Seg7Display } from "./devices.js";
+import { createBuzzerBoard, createAdcBoard, Seg7Display } from "./devices.js";
 import { PROGRAMS } from "./programs.js";
 
 const BASE_IPS = 30000;
@@ -32,6 +32,9 @@ const el = {
   ports: $("ports"),
   status: $("status"),
   note: $("program-note"),
+  analog: $("analog"),
+  analogVal: $("analog-val"),
+  analogRow: $("analog-row"),
 };
 
 // ---------- 运行状态 ----------
@@ -189,8 +192,10 @@ function renderPanels() {
 }
 
 function renderBuzzer() {
-  const on = board.devices.buzzer.sample();
-  el.buzzer.classList.toggle("on", on);
+  const bz = board.devices.buzzer;
+  if (!bz) { el.buzzer.hidden = true; return; }   // ADC 实验箱没有蜂鸣器
+  el.buzzer.hidden = false;
+  el.buzzer.classList.toggle("on", bz.sample());
 }
 
 /** 从程序数据段读一个变量的值（用于显示 WINNER / LOCK_FLAG 这类业务状态） */
@@ -201,7 +206,7 @@ function readVar(name) {
 }
 
 function renderStatus() {
-  if (cpu.halted) {
+  if (cpu.halted && !cpu.hltWaiting) {
     el.status.classList.add("err");
     el.status.textContent = `已停止：${cpu.haltedReason || "程序结束"}　|　累计执行 ${cpu.instructionCount.toLocaleString()} 条指令`;
     return;
@@ -222,8 +227,15 @@ function renderStatus() {
     else parts.push("待机 · 等待开始");
   }
 
+  const adc = board.devices.adc;
+  if (adc) {
+    parts.push(`ADC 输入 ${adc.analog} · 已采样 ${adc.conversions} 次`);
+    if (cpu.hltWaiting) parts.push("HLT 等待中断");
+  }
+
   parts.push(`数码管 ${seg.getDigits().map((c) => Seg7Display.toChar(c)).join("")}`);
-  if (board.devices.buzzer.sample()) parts.push("蜂鸣器 响");
+  const bz = board.devices.buzzer;
+  if (bz && bz.sample()) parts.push("蜂鸣器 响");
   parts.push(`累计 ${cpu.instructionCount.toLocaleString()} 条指令`);
 
   el.status.textContent = parts.join("　|　");
@@ -239,7 +251,8 @@ function frame(now) {
   budget += dt * BASE_IPS * speedFactor;
 
   let n = 0;
-  while (budget >= 1 && n < MAX_STEPS_PER_FRAME && !cpu.halted) {
+  // HLT 等待中断时 CPU 仍在"运行"（时钟在走），不能当成结束
+  while (budget >= 1 && n < MAX_STEPS_PER_FRAME && !(cpu.halted && !cpu.hltWaiting)) {
     cpu.step();
     budget -= 1;
     n++;
@@ -247,7 +260,7 @@ function frame(now) {
   budget = Math.min(budget, BASE_IPS);   // 防止欠账滚雪球
 
   render();
-  if (cpu.halted) { stop(); return; }
+  if (cpu.halted && !cpu.hltWaiting) { stop(); return; }
   requestAnimationFrame(frame);
 }
 
@@ -260,7 +273,10 @@ function render() {
 }
 
 function start() {
-  if (cpu.halted) return;
+  // HLT 等待中断不算"结束"，照样可以继续跑
+  if (cpu.halted && !cpu.hltWaiting) return;
+  cpu.halted = false;
+  cpu.hltWaiting = false;
   running = true;
   budget = 0;
   lastTime = performance.now();
@@ -282,7 +298,7 @@ function toggleRun() {
 
 function stepOnce() {
   if (running) stop();
-  if (cpu.halted) return;
+  if (cpu.halted && !cpu.hltWaiting) return;
   cpu.step();
   render();
 }
@@ -297,8 +313,9 @@ function reset() {
   ppi.setKeys(0);
   for (const k of el.keys.querySelectorAll(".key")) k.classList.remove("pressed");
   budget = 0;
-  // 重新走一遍上电初始化，让数码管回到 20
-  for (let i = 0; i < 3000 && !cpu.halted; i++) cpu.step();
+  // 重新走一遍上电初始化，让数码管回到初始显示
+  const warmup = meta.board === "adc" ? 9000 : 3000;
+  for (let i = 0; i < warmup && !(cpu.halted && !cpu.hltWaiting); i++) cpu.step();
   render();
 }
 
@@ -307,6 +324,10 @@ function reset() {
    ========================================================= */
 function buildKeys() {
   el.keys.innerHTML = "";
+  const hasKeys = Array.isArray(meta.keys) && meta.keys.length > 0;
+  el.keys.closest(".board-row").hidden = !hasKeys;
+  if (!hasKeys) return;
+
   for (const k of meta.keys) {
     const btn = document.createElement("button");
     btn.className = "key";
@@ -322,6 +343,19 @@ function buildKeys() {
     });
     el.keys.appendChild(btn);
   }
+}
+
+/** 模拟输入滑块：只有 ADC 实验有 */
+function setupAnalog() {
+  const a = meta.analog;
+  el.analogRow.hidden = !a;
+  if (!a) return;
+  el.analog.min = a.min;
+  el.analog.max = a.max;
+  el.analog.value = a.default;
+  const adc = board.devices.adc;
+  if (adc) adc.setAnalog(a.default);
+  el.analogVal.textContent = `${a.default} · 0x${a.default.toString(16).toUpperCase().padStart(2, "0")}`;
 }
 
 window.addEventListener("pointerup", () => {
@@ -343,7 +377,7 @@ function loadProgram(id) {
   meta = PROGRAMS[id];
   program = assemble(meta.source);
   initialMemory = Uint8Array.from(program.memory);
-  board = createBuzzerBoard(meta.ports);
+  board = meta.board === "adc" ? createAdcBoard(meta.ports) : createBuzzerBoard(meta.ports);
   ppi = board.devices.ppi;
   seg = board.devices.seg;
   cpu = new CPU(program, board);
@@ -356,16 +390,19 @@ function loadProgram(id) {
   el.run.classList.remove("running");
 
   renderSource();
-  buildDisplays(2);
+  buildDisplays(meta.board === "adc" ? 1 : 2);
   buildKeys();
   buildPanels();
+  setupAnalog();
 
   el.note.hidden = !meta.note;
   el.note.textContent = meta.note || "";
 
-  // 自动执行一小段，走完上电初始化（装初值 20 并刷新到数码管），
-  // 这样页面一打开就能看到「20」，不用先点运行
-  for (let i = 0; i < 3000 && !cpu.halted; i++) cpu.step();
+  // 自动执行一小段，走完上电初始化（装初值并刷新到数码管），
+  // 这样页面一打开就能看到结果，不用先点运行。
+  // ADC 实验还要等第一次定时中断，所以多跑一段。
+  const warmup = meta.board === "adc" ? 9000 : 3000;
+  for (let i = 0; i < warmup && !(cpu.halted && !cpu.hltWaiting); i++) cpu.step();
 
   render();
 }
@@ -393,6 +430,14 @@ function init() {
   speedFactor = SPEED_STEPS[+el.speed.value - 1];
   el.speedLabel.textContent = `${speedFactor}×`;
 
+  el.analog.addEventListener("input", () => {
+    const adc = board && board.devices && board.devices.adc;
+    if (!adc) return;
+    const v = +el.analog.value;
+    adc.setAnalog(v);
+    el.analogVal.textContent = `${v} · 0x${v.toString(16).toUpperCase().padStart(2, "0")}`;
+  });
+
   // 键盘快捷键：空格运行/暂停，S 单步，R 复位
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "SELECT") return;
@@ -412,6 +457,7 @@ function init() {
       return {
         running,
         halted: cpu.halted,
+        hltWaiting: cpu.hltWaiting,
         haltedReason: cpu.haltedReason,
         ip: cpu.ip,
         instructionCount: cpu.instructionCount,
@@ -424,6 +470,9 @@ function init() {
         lock: readVar("LOCK_FLAG"),
         runFlag: readVar("RUN_FLAG"),
         curTime: readVar("CUR_TIME"),
+        adcAnalog: board.devices.adc ? board.devices.adc.analog : null,
+        adcConversions: board.devices.adc ? board.devices.adc.conversions : null,
+        timerPulses: board.devices.timer ? board.devices.timer.counters[1].reload : null,
       };
     },
     programId: () => meta.id,

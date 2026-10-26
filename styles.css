@@ -6,6 +6,8 @@
   --led:#ff3b30; --led-off:#3a1210;
 }
 *{box-sizing:border-box}
+/* 显式声明 display 的元素会覆盖 hidden 属性的默认样式，这里补一刀 */
+[hidden]{display:none !important}
 html,body{height:100%}
 body{
   margin:0;background:var(--bg);color:var(--ink);
@@ -107,6 +109,8 @@ main{
 .unit{display:flex;flex-direction:column;gap:7px}
 .unit.wide{flex:1}
 .unit-label{font-size:11.5px;color:#7c99ab}
+.unit-label b{color:#ffd166;font-variant-numeric:tabular-nums;font-weight:600}
+.board input[type=range]{width:100%;accent-color:#5fb3d9;cursor:pointer}
 
 /* 数码管 */
 .displays{display:flex;gap:14px}

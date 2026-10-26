@@ -30,11 +30,11 @@ export class CPU {
     this.flags = { ZF: 0, SF: 0, CF: 0, OF: 0, PF: 0, AF: 0 };
     this.ip = this.program.entry;
     this.halted = false;
+    this.hltWaiting = false;
     this.haltedReason = "";
     this.currentLine = -1;
     this.instructionCount = 0;
     this.ifFlag = 0;              // 中断允许标志（STI/CLI）
-    this.pendingInterrupt = null; // {vector} 由 8259 置入
     if (this.board) this.board.reset();
   }
 
@@ -75,13 +75,17 @@ export class CPU {
   widthOf(op) {
     if (!op) return null;
     if (op.t === "reg") return REG8.has(op.r) ? 1 : 2;
-    if (op.t === "mem" || op.t === "memidx") return op.size || 1;
+    if (op.t === "mem") return op.size ?? 1;
+    if (op.t === "memidx") return op.size ?? null;   // [BX] 这类宽度未知，交给对方操作数决定
     return null;                  // imm 不决定宽度
   }
 
   addrOf(op) {
     if (op.t === "mem") return op.addr;
-    if (op.t === "memidx") return (op.addr + this.getReg(op.idx)) & 0xffff;
+    if (op.t === "memidx") {
+      const a = (op.base || 0) + this.getReg(op.idx) + (op.disp || 0);
+      return a & 0xffff;
+    }
     throw new Error("不是内存操作数");
   }
 
@@ -131,14 +135,32 @@ export class CPU {
 
   // ---------- 执行一步 ----------
   step() {
-    if (this.halted) return false;
+    // HLT 只是「停机等中断」，不是程序结束：外设时钟照常推进，
+    // 中断一到就恢复执行。真实 8086 就是这个语义。
+    if (this.halted) {
+      if (!this.hltWaiting) return false;
+      if (this.board.tick) this.board.tick();
+      if (this.ifFlag && this.board.pollInterrupt) {
+        const vec = this.board.pollInterrupt();
+        if (vec !== null && vec !== undefined) {
+          this.halted = false;
+          this.hltWaiting = false;
+          this.enterInterrupt(vec);
+        }
+      }
+      return true;          // 空转也算一步，让时钟与节拍继续推进
+    }
 
-    // 中断检查：优先级高于取指
-    if (this.pendingInterrupt && this.ifFlag) {
-      const vec = this.pendingInterrupt;
-      this.pendingInterrupt = null;
-      this.enterInterrupt(vec);
-      return true;
+    // 推进外设时钟（8253 计数 → 定时中断）
+    if (this.board.tick) this.board.tick();
+
+    // 硬件中断：优先级高于取指。IF=0 时不响应，挂到下一次
+    if (this.ifFlag && this.board.pollInterrupt) {
+      const vec = this.board.pollInterrupt();
+      if (vec !== null && vec !== undefined) {
+        this.enterInterrupt(vec);
+        return true;
+      }
     }
 
     const instr = this.program.code[this.ip];
@@ -381,7 +403,8 @@ export class CPU {
       case "STC": this.flags.CF = 1; return;
       case "HLT": {
         this.halted = true;
-        this.haltedReason = "执行 HLT，CPU 停止";
+        this.hltWaiting = true;      // 等中断，不是结束
+        this.haltedReason = "HLT：等待中断";
         return;
       }
       case "IRET": {

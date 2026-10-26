@@ -8,7 +8,7 @@
  */
 import { assemble } from "../js/asm.js";
 import { CPU } from "../js/cpu.js";
-import { createBuzzerBoard, Seg7Display } from "../js/devices.js";
+import { createBuzzerBoard, createAdcBoard, Seg7Display } from "../js/devices.js";
 import { PROGRAMS } from "../js/programs.js";
 
 let pass = 0, fail = 0;
@@ -188,6 +188,84 @@ console.log("\n[段码解码]");
   const segs = Seg7Display.toSegments(0x3f);
   ok("0x3F 点亮 a~f 六段", segs.filter(Boolean).length === 6, `实际 ${segs.filter(Boolean).length}`);
   ok("0x3F 的 g 段熄灭", segs[6] === false);
+}
+
+// ============================================================
+console.log("\n[ADC 定时采样：解析与寻址]");
+{
+  const meta = PROGRAMS.adc;
+  const program = assemble(meta.source);
+  ok("解析出 128 条指令", program.code.length === 128, `实际 ${program.code.length}`);
+  ok("数据段 1296 字节（1024 向量表 + 272 数据）", program.dataEnd === 1296, `实际 ${program.dataEnd}`);
+  ok("向量表在前，SEG_DISPLAY 顺延到 1024", program.symbols.get("SEG_DISPLAY").value === 1024,
+     `实际 ${program.symbols.get("SEG_DISPLAY").value}`);
+  ok("IRQ_HANDLER 是代码标签", program.symbols.get("IRQ_HANDLER").kind === "label");
+}
+
+// ============================================================
+console.log("\n[ADC 定时采样：外设初始化]");
+{
+  const meta = PROGRAMS.adc;
+  const program = assemble(meta.source);
+  const board = createAdcBoard(meta.ports);
+  const cpu = new CPU(program, board);
+  cpu.reset();
+  board.devices.adc.setAnalog(200);
+  for (let i = 0; i < 3000; i++) cpu.step();
+
+  const timer = board.devices.timer, pic = board.devices.pic;
+
+  ok("8253 计数器0 初值 1000", timer.counters[0].reload === 1000, `实际 ${timer.counters[0].reload}`);
+  ok("8253 计数器1 初值 100", timer.counters[1].reload === 100, `实际 ${timer.counters[1].reload}`);
+  ok("8259 中断向量基址 0x60", pic.vectorBase === 0x60, `实际 0x${pic.vectorBase.toString(16)}`);
+  ok("8259 只开放 IR0（屏蔽字 0xFE）", pic.imr === 0xfe, `实际 0x${pic.imr.toString(16)}`);
+
+  // 中断向量表由程序用 ES:[BX] 写入：类型 0x60 → 物理地址 0x180
+  const vecIP = cpu.memory[0x180] | (cpu.memory[0x181] << 8);
+  ok("向量表 0x180 指向 IRQ_HANDLER", vecIP === program.symbols.get("IRQ_HANDLER").value,
+     `0x180=${vecIP} 期望 ${program.symbols.get("IRQ_HANDLER").value}`);
+
+  ok("执行 HLT 后进入等待中断状态", cpu.halted === true && cpu.hltWaiting === true);
+  ok("IF 已开（STI 生效）", cpu.ifFlag === 1);
+}
+
+// ============================================================
+console.log("\n[ADC 定时采样：10Hz 中断与显示]");
+{
+  const meta = PROGRAMS.adc;
+  const program = assemble(meta.source);
+  const board = createAdcBoard(meta.ports);
+  const cpu = new CPU(program, board);
+  cpu.reset();
+  board.devices.adc.setAnalog(200);
+
+  const runSteps = (n) => { for (let i = 0; i < n; i++) cpu.step(); };
+  runSteps(3000);                       // 初始化 + 等待第一次中断
+  const c0 = board.devices.adc.conversions;
+
+  runSteps(30000);                      // 约 1 秒
+  const c1 = board.devices.adc.conversions;
+  const perSecond = c1 - c0;
+
+  ok("1 秒内采样约 10 次", perSecond >= 8 && perSecond <= 12, `实际 ${perSecond} 次`);
+  ok("显示为高 4 位（200>>4=12 → C）", board.devices.seg.getDigits()[0] === 0x39,
+     `段码 0x${board.devices.seg.getDigits()[0].toString(16)}`);
+
+  // 改模拟输入，下一轮采样后应跟着变
+  board.devices.adc.setAnalog(60);
+  runSteps(6000);
+  ok("输入 60 时显示 3（60>>4=3）", board.devices.seg.getDigits()[0] === 0x4f,
+     `段码 0x${board.devices.seg.getDigits()[0].toString(16)}`);
+
+  board.devices.adc.setAnalog(255);
+  runSteps(6000);
+  ok("输入 255 时显示 F（255>>4=15）", board.devices.seg.getDigits()[0] === 0x71,
+     `段码 0x${board.devices.seg.getDigits()[0].toString(16)}`);
+
+  board.devices.adc.setAnalog(0);
+  runSteps(6000);
+  ok("输入 0 时显示 0", board.devices.seg.getDigits()[0] === 0x3f,
+     `段码 0x${board.devices.seg.getDigits()[0].toString(16)}`);
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败\n`);

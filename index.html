@@ -60,8 +60,15 @@
 
       <div class="board-row">
         <div class="unit wide">
-          <div class="unit-label">按键（低电平有效）</div>
+          <div class="unit-label" id="keys-label">按键（低电平有效）</div>
           <div class="keys" id="keys"></div>
+        </div>
+      </div>
+
+      <div class="board-row" id="analog-row" hidden>
+        <div class="unit wide">
+          <div class="unit-label">模拟输入电压 <b id="analog-val">—</b></div>
+          <input type="range" id="analog" min="0" max="255" step="1" value="200">
         </div>
       </div>
     </div>
@@ -88,7 +95,7 @@
 <footer>
   <p>
     源码取自 <a href="https://github.com/Leslieryin/8086-microcomputer-lab">8086-microcomputer-lab</a>，
-    未经改写。CPU 与 8255 的行为在浏览器本地仿真，不需要 Proteus。
+    未经改写。CPU 与 8255 / 8253 / 8259 / ADC0808 的行为在浏览器本地仿真，不需要 Proteus。
   </p>
 </footer>
 

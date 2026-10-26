@@ -23,6 +23,8 @@ export class Board {
     this.listeners = [];
     this.devices = {};
     this.unmapped = new Set();    // 记录没有设备响应的端口，便于排查
+    this.tickHooks = [];          // 每执行一条指令推进一次（定时器用）
+    this.interruptPoll = null;    // CPU 每步询问是否有中断请求
   }
 
   register(port, device, reg) {
@@ -43,6 +45,14 @@ export class Board {
     const v = entry ? entry.device.read(entry.reg) : 0xff;
     for (const fn of this.listeners) fn("read", p, v & 0xff);
     return v & 0xff;
+  }
+
+  tick() {
+    for (const fn of this.tickHooks) fn();
+  }
+
+  pollInterrupt() {
+    return this.interruptPoll ? this.interruptPoll() : null;
   }
 
   reset() {
@@ -79,17 +89,27 @@ export class PPI8255 {
   setKeys(mask) { this.pcIn = (~mask) & 0xff; }
 }
 
-/** 七段数码管：从 PA 取段码，从 PB 取位选 */
+/** 七段数码管：从数据口取段码，从位选口取位选 */
 export class Seg7Display {
-  constructor(ppi, digitCount = 2) {
+  /**
+   * @param ppi 8255 实例
+   * @param digitCount 位数
+   * @param opt.dataPort 段码来自哪个端口，'PA' 或 'PB'
+   * @param opt.selectPort 位选来自哪个端口，null 表示静态显示（单管直连）
+   */
+  constructor(ppi, digitCount = 2, opt = {}) {
     this.ppi = ppi;
     this.digitCount = digitCount;
+    this.dataPort = opt.dataPort || "PA";
+    this.selectPort = opt.selectPort === undefined ? "PB" : opt.selectPort;
     this.reset();
   }
   reset() {
     this.latched = new Array(this.digitCount).fill(0);
-    this.active = -1;             // 当前正在扫描的位
+    this.active = -1;
   }
+  _portVal(name) { return name === "PA" ? this.ppi.pa : this.ppi.pb; }
+
   /**
    * 每次 PA/PB 变化后调用，锁存当前点亮的位。
    *
@@ -98,9 +118,15 @@ export class Seg7Display {
    * 真实硬件上这一小段熄灭时间被视觉暂留抹平，这里用「保留上次非零值」等效实现。
    */
   refresh() {
-    const sel = this.ppi.pb;
-    const code = this.ppi.pa;
+    const code = this._portVal(this.dataPort);
     if (code === 0) return;              // 全灭，保留上一次的值
+
+    if (this.selectPort === null) {      // 静态显示：只有一个管
+      this.latched[0] = code;
+      this.active = 0;
+      return;
+    }
+    const sel = this._portVal(this.selectPort);
     for (let i = 0; i < this.digitCount; i++) {
       if (sel & (1 << i)) {
         this.latched[i] = code;
@@ -156,6 +182,210 @@ export function createBuzzerBoard(ports) {
   // PA 或 PB 一变就重算锁存
   board.listeners.push((type, port) => {
     if (type === "write" && (port === ports.PA || port === ports.PB)) seg.refresh();
+  });
+
+  return board;
+}
+
+/* =========================================================================
+   以下是 ADC 定时采样实验用到的外设
+   ========================================================================= */
+
+/**
+ * 8253 可编程定时器（只实现本实验用到的部分：计数器 0/1 级联分频）
+ *
+ * 时间推进方式：每执行一条 CPU 指令推进固定个数的输入时钟周期。
+ * 标定依据——抢答器实测 30000 条指令 ≈ 1 秒，本实验 8253 输入 1MHz，
+ * 于是 1 条指令 ≈ 1e6 / 30000 ≈ 33.3 个时钟周期。
+ * 这样课设设定的「1MHz → 1000 → 1kHz → 100 → 10Hz」在界面上就是真的 10Hz。
+ */
+export class Timer8253 {
+  constructor(cyclesPerStep = 1e6 / 30000) {
+    this.cps = cyclesPerStep;
+    this.onPulse = null;      // 计数器 1 输出一个脉冲时回调（接 8259 的 IRQ0）
+    this.reset();
+  }
+
+  reset() {
+    this.acc = 0;
+    this.counters = [0, 1].map(() => ({
+      reload: 0, count: 0, mode: 3, low: 0, half: false,
+    }));
+  }
+
+  write(reg, v) {
+    if (reg === "CTRL") return this.writeControl(v);
+    return this.writeCounter(reg === "CNT0" ? 0 : 1, v);
+  }
+
+  read() { return 0; }
+
+  writeControl(v) {
+    const sel = (v >> 6) & 3;
+    if (sel > 2) return;                     // 读回命令，忽略
+    const mode = (v >> 1) & 7;
+    const c = this.counters[sel];
+    c.mode = mode;
+    c.half = false;
+  }
+
+  writeCounter(i, v) {
+    const c = this.counters[i];
+    if (!c.half) {
+      c.low = v & 0xff;
+      c.half = true;
+      return;
+    }
+    // 先低字节后高字节，写完装载新初值
+    c.reload = ((v << 8) | c.low) & 0xffff;
+    c.count = c.reload > 0 ? c.reload : 0x10000;
+    c.half = false;
+  }
+
+  tick() {
+    this.acc += this.cps;
+    let cycles = Math.floor(this.acc);
+    if (cycles <= 0) return;
+    this.acc -= cycles;
+
+    const c0 = this.counters[0];
+    if (!c0.reload) return;
+
+    c0.count -= cycles;
+    let guard = 0;
+    while (c0.count <= 0 && guard++ < 1024) {
+      c0.count += c0.reload;
+      this._pulseSecond();
+    }
+  }
+
+  _pulseSecond() {
+    const c1 = this.counters[1];
+    if (!c1.reload) return;
+    c1.count -= 1;
+    if (c1.count <= 0) {
+      c1.count += c1.reload;
+      if (this.onPulse) this.onPulse();
+    }
+  }
+}
+
+/** 8259 可编程中断控制器（单片，主程序只用到 IR0） */
+export class PIC8259 {
+  constructor() { this.reset(); }
+
+  reset() {
+    this.icwStep = 0;        // 0=等ICW1 1=等ICW2 2=等ICW4 3=就绪
+    this.vectorBase = 0;
+    this.imr = 0xff;         // 全屏蔽
+    this.irr = 0;            // 中断请求
+    this.isr = 0;            // 服务中
+    this.needICW4 = false;
+  }
+
+  write(reg, v) {
+    if (reg === "CMD") return this.writeCmd(v);
+    return this.writeData(v);
+  }
+
+  read() { return 0; }
+
+  writeCmd(v) {
+    if (v & 0x10) {                        // ICW1：边沿触发 / 单片 / 是否需要 ICW4
+      this.icwStep = 1;
+      this.needICW4 = !!(v & 0x01);
+      this.imr = 0xff;
+      this.irr = 0;
+      this.isr = 0;
+      return;
+    }
+    if (v & 0x08) return;                  // OCW3，忽略
+    if ((v & 0xe0) === 0x20) this.isr = 0; // OCW2：非指定 EOI
+  }
+
+  writeData(v) {
+    if (this.icwStep === 1) {              // ICW2：中断类型号基址
+      this.vectorBase = v & 0xf8;
+      this.icwStep = this.needICW4 ? 2 : 3;
+      return;
+    }
+    if (this.icwStep === 2) {              // ICW4：8086 模式
+      this.icwStep = 3;
+      return;
+    }
+    this.imr = v;                          // OCW1：屏蔽字
+  }
+
+  /** 外设拉高某条 IRQ */
+  raise(irq) { this.irr |= (1 << irq); }
+
+  /** CPU 来查询：返回待处理的中断类型号，没有则 null */
+  acknowledge() {
+    const active = this.irr & ~this.imr & ~this.isr;
+    if (!active) return null;
+    let irq = 0;
+    while (!(active & (1 << irq))) irq++;
+    this.irr &= ~(1 << irq);
+    this.isr |= (1 << irq);
+    return (this.vectorBase + irq) & 0xff;
+  }
+}
+
+/** ADC0808 模数转换器：写入启动转换，读取得 8 位结果 */
+export class ADC0808 {
+  constructor() { this.reset(); }
+
+  reset() {
+    this.analog = 128;       // 模拟输入（界面滑块控制）
+    this.result = 128;
+    this.conversions = 0;
+  }
+
+  write(_reg, _v) {
+    // 简化：写入即视为启动转换并立即完成。
+    // 真实器件需要约 100μs，而课设里的延时循环（255 次 LOOP）远长于此，不影响结果。
+    this.result = this.analog & 0xff;
+    this.conversions++;
+  }
+
+  read(_reg) { return this.result & 0xff; }
+
+  setAnalog(v) { this.analog = v & 0xff; }
+}
+
+/**
+ * ADC 定时采样实验箱：8253 + 8259 + 8255 + ADC0808 + 一位数码管
+ *
+ * 信号链：8253 两级分频 10Hz → 8259 IR0 → 中断服务程序
+ *        → 启动 ADC0808 → 读结果取高 4 位 → 8255 PB → 数码管
+ */
+export function createAdcBoard(ports) {
+  const board = new Board();
+  const ppi = new PPI8255();
+  const timer = new Timer8253();
+  const pic = new PIC8259();
+  const adc = new ADC0808();
+  // 这个实验的数码管直接挂在 PB 口上，没有位选（静态显示单管）
+  const seg = new Seg7Display(ppi, 1, { dataPort: "PB", selectPort: null });
+
+  board.register(ports.PPI_PA, ppi, "PA");
+  board.register(ports.PPI_PB, ppi, "PB");
+  board.register(ports.PPI_PC, ppi, "PC");
+  board.register(ports.PPI_CTRL, ppi, "CTRL");
+  board.register(ports.CNT0, timer, "CNT0");
+  board.register(ports.CNT1, timer, "CNT1");
+  board.register(ports.TIMER_CTRL, timer, "CTRL");
+  board.register(ports.PIC_CMD, pic, "CMD");
+  board.register(ports.PIC_DATA, pic, "DATA");
+  board.register(ports.ADC, adc, "DATA");
+
+  timer.onPulse = () => pic.raise(0);          // 定时器 10Hz 输出接 IR0
+  board.devices = { ppi, seg, timer, pic, adc };
+  board.tickHooks.push(() => timer.tick());
+  board.interruptPoll = () => pic.acknowledge();
+
+  board.listeners.push((type, port) => {
+    if (type === "write" && port === ports.PPI_PB) seg.refresh();
   });
 
   return board;

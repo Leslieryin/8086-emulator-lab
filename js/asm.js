@@ -52,19 +52,39 @@ function splitOperands(text) {
 
 /**
  * 解析单个操作数。此时符号表已完整，可以直接判型。
- * 返回：{t:'imm',v} | {t:'reg',r} | {t:'mem',addr} | {t:'memidx',addr,idx}
+ * 返回：{t:'imm',v} | {t:'reg',r} | {t:'mem',addr,size} | {t:'memidx',base,idx,disp,size}
  */
 function parseOperand(text, symbols) {
-  const s = String(text).trim();
+  let s = String(text).trim();
 
-  // 变址：SEG_TAB[BX]
+  // OFFSET 运算符：取标签（指令索引）或变量的地址
+  const off = s.match(/^OFFSET\s+(\w+)$/i);
+  if (off) {
+    const sym = symbols.get(off[1].toUpperCase());
+    if (!sym) throw new Error(`OFFSET 引用了未定义的符号「${off[1]}」`);
+    return { t: "imm", v: sym.value };
+  }
+
+  // 段前缀 ES: / DS: / CS: / SS: —— 简化模型里所有段共享一个 64K 空间，前缀可忽略
+  const segPfx = s.match(/^(ES|DS|CS|SS)\s*:\s*(.+)$/i);
+  if (segPfx) s = segPfx[2].trim();
+
+  // 纯括号变址：[BX]、[BX+2]、[SI-4]
+  const bracket = s.match(/^\[\s*([A-Za-z]{2})\s*([+-]\s*\d+)?\s*\]$/);
+  if (bracket) {
+    if (!isRegister(bracket[1])) throw new Error(`「${bracket[1]}」不是寄存器`);
+    const disp = bracket[2] ? parseInt(bracket[2].replace(/\s+/g, ""), 10) : 0;
+    return { t: "memidx", base: 0, idx: bracket[1].toUpperCase(), disp, size: null };
+  }
+
+  // 符号 + 变址：SEG_TAB[BX]
   const idxMatch = s.match(/^([A-Za-z_]\w*)\s*\[\s*([A-Za-z]{2})\s*\]$/);
   if (idxMatch) {
     const sym = symbols.get(idxMatch[1].toUpperCase());
     if (!sym || sym.kind !== "var") {
       throw new Error(`变址寻址的基址「${idxMatch[1]}」不是已定义的数据变量`);
     }
-    return { t: "memidx", addr: sym.value, idx: idxMatch[2].toUpperCase(), size: sym.size };
+    return { t: "memidx", base: sym.value, idx: idxMatch[2].toUpperCase(), disp: 0, size: sym.size };
   }
 
   // 纯寄存器
@@ -95,7 +115,6 @@ export function assemble(source) {
   const memory = new Uint8Array(65536);
   const code = [];                    // {op, args, line, text}
   let memPtr = 0;
-  let seg = null;                     // 'data' | 'code'
   let lastVarName = null;             // DB 无标签续接时记住上一个变量
   let entryLabel = null;
 
@@ -106,16 +125,17 @@ export function assemble(source) {
     if (!text) continue;
     const upper = text.toUpperCase();
 
-    // 段定义。段名同时注册为常量 0：简化模型里所有段共享同一个 64K 空间，
-    // 所以 MOV AX,DATA 这类取段基址的写法自然取到 0。
+    // 段定义。段名注册为常量 0：简化模型里所有段共享同一个 64K 空间，
+    // 所以 MOV AX,STORAGE 这类取段基址的写法自然取到 0。
+    // 数据按段定义顺序线性分配——向量表声明在最前，正好落在 0x0000 起，
+    // 与 ES:[BX] 写中断向量表的约定吻合。
     if (/^\w+\s+SEGMENT\b/i.test(text)) {
       const segName = text.match(/^(\w+)/)[1].toUpperCase();
       if (!symbols.has(segName)) symbols.set(segName, { kind: "const", value: 0 });
-      seg = /^DATA\b/i.test(text) ? "data" : "code";
       lastVarName = null;
       continue;
     }
-    if (/^\w+\s+ENDS\b/i.test(text)) { seg = null; continue; }
+    if (/^\w+\s+ENDS\b/i.test(text)) continue;
     if (/^ASSUME\b/i.test(text)) continue;
 
     // 程序结束：END 后跟入口标签
@@ -150,7 +170,8 @@ export function assemble(source) {
       const name = dataMatch[1] ? dataMatch[1].toUpperCase() : lastVarName;
       const body = dataMatch[3].trim();
 
-      if (!name) throw new Error(`第 ${li + 1} 行：无标签的数据定义没有可归属的变量`);
+      // 允许无标签且没有可续接变量的数据定义（典型是向量表的 DB 1024 DUP(0)），
+      // 只占地址空间，不建立符号——程序用 ES:[BX] 按偏移直接写它。
 
       // 形式一：n DUP(值)
       const dup = body.match(/^(\d+)\s+DUP\s*\(\s*(.+?)\s*\)$/i);
