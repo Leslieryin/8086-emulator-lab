@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 测试跑的是 programs.js 里内嵌的真实课设汇编
+      - name: 模拟器端到端断言
+        run: node tests/emulator.test.mjs
+
+      - name: 校验页面与模块齐全
+        run: |
+          for f in index.html styles.css js/asm.js js/cpu.js js/devices.js js/programs.js js/ui.js; do
+            test -f "$f" || { echo "缺少 $f"; exit 1; }
+          done
+          echo "页面与模块齐全"

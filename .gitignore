@@ -1,0 +1,11 @@
+# 编辑器与系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 本地调试产物
+*.log
+_screenshot*.png
+_temp*.mjs
