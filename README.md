@@ -93,13 +93,13 @@ ADC 定时采样实验：
 - `[NAME] DB/DW 值, 值...`、`n DUP(值)`
 - 标号：`NAME:`、`NAME PROC [NEAR|FAR]`、以及**行内标号** `KD1: LOOP KD1`
 - 变址寻址 `SEG_TAB[BX]`
-- 30 条指令
+- 41 条指令
 
 解析分两遍：第一遍收集符号并给数据段分配地址，第二遍解析操作数——因为 `CALL SCAN_DISPLAY` 这类前向引用必须先知道标签位置。
 
 ### CPU（`js/cpu.js`）
 
-30 条指令，带真实标志位语义（ZF/SF/CF/OF/PF/AF）、16 位栈、`CALL`/`RET`/`LOOP`。
+41 条指令，带真实标志位语义（ZF/SF/CF/OF/PF/AF）、16 位栈、`CALL`/`RET`/`LOOP`。
 
 和真实 8086 的差异（有意为之）：
 

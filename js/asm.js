@@ -12,7 +12,7 @@
  *   常量     NAME EQU 值
  *   数据     [NAME] DB 值[, 值...]、DB 数量 DUP(值)
  *   标签     NAME:  或  NAME PROC [NEAR|FAR]  ... NAME ENDP
- *   指令     30 条（见 cpu.js）
+ *   指令     41 条（见 cpu.js）
  */
 
 /** 解析数值字面量：280H / 0E8H / 20 / 0AH */
