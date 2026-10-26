@@ -1,0 +1,4 @@
+# 统一用 LF：脚本要在 Linux CI 上跑，行尾混进 CR 会让
+# 从 index.html 里切片执行的那部分测试出现诡异的语法错误。
+* text=auto eol=lf
+*.png binary
