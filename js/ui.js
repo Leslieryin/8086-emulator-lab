@@ -38,6 +38,7 @@ const el = {
 };
 
 // ---------- 运行状态 ----------
+let inited = false;       // init() 是否已执行过
 let meta = null;          // 当前程序元数据
 let program = null;       // assemble 结果
 let cpu = null;
@@ -193,8 +194,13 @@ function renderPanels() {
 
 function renderBuzzer() {
   const bz = board.devices.buzzer;
-  if (!bz) { el.buzzer.hidden = true; return; }   // ADC 实验箱没有蜂鸣器
-  el.buzzer.hidden = false;
+  // 要藏整个 .unit：只藏图标的话外层「蜂鸣器」标签会留在 ADC 实验箱里。
+  const unit = el.buzzer.parentElement;
+  if (!bz) {
+    unit.hidden = true;
+    return;
+  }
+  unit.hidden = false;
   el.buzzer.classList.toggle("on", bz.sample());
 }
 
@@ -411,6 +417,12 @@ function loadProgram(id) {
    初始化
    ========================================================= */
 function init() {
+  // 只允许跑一次。module 脚本执行时 readyState 已经是 "interactive"，
+  // 下面的立即调用和 DOMContentLoaded 会各触发一次，不设守卫就会把
+  // 选项翻倍、事件监听器也翻倍。
+  if (inited) return;
+  inited = true;
+
   for (const p of Object.values(PROGRAMS)) {
     const opt = document.createElement("option");
     opt.value = p.id;
