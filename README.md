@@ -7,6 +7,10 @@
 
 **在浏览器里跑微机原理课设的汇编，不用装 Proteus。**
 
+> **EN** — A browser-based 8086 virtual lab: the original course-design assembly runs unchanged against emulated 8255/8253/8259/ADC0808, with single-stepping, registers and flags visible. No Proteus install needed. [Try it →](https://leslieryin.github.io/8086-emulator-lab/)
+
+![单步执行：代码高亮前移，寄存器与数码管同步更新](docs/demo.gif)
+
 ![抢答成功](docs/shot-locked.png)
 
 ADC 定时采样实验：
