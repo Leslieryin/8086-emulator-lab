@@ -1,6 +1,7 @@
 # 8086 虚拟实验箱
 
 [![在线演示](https://img.shields.io/badge/demo-%E5%9C%A8%E7%BA%BF%E6%89%93%E5%BC%80-0f6cbd?style=flat-square)](https://leslieryin.github.io/8086-emulator-lab/)
+![CI](https://github.com/Leslieryin/8086-emulator-lab/actions/workflows/ci.yml/badge.svg)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![deps](https://img.shields.io/badge/dependencies-none-2ea44f)
 
